@@ -321,7 +321,7 @@ impl DbInner {
         let durable_seq = self.oracle.last_remote_persisted_seq();
         [
             Some(durable_seq),
-            self.snapshot_manager.min_active_seq(),
+            Some(self.snapshot_manager.min_retained_seq()),
             self.txn_manager.min_active_seq(),
         ]
         .into_iter()
@@ -641,6 +641,7 @@ mod tests {
             .snapshot_manager
             .new_snapshot(Some(test_case.min_active_seq));
         // Set durable watermark high so it doesn't interfere with transaction-based retention tests
+        db.inner.oracle.advance_committed_seq(u64::MAX);
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
         let row_entries_length = test_case.row_entries.len();
@@ -681,6 +682,7 @@ mod tests {
             .await
             .unwrap();
 
+        db.inner.oracle.advance_committed_seq(u64::MAX);
         db.inner.oracle.advance_durable_seq(u64::MAX);
 
         let table = WritableKVTable::new();
@@ -720,6 +722,7 @@ mod tests {
         // Given
         let db = setup_test_db_without_merge_operator().await;
         db.inner.snapshot_manager.new_snapshot(Some(0));
+        db.inner.oracle.advance_committed_seq(4);
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_merge(&Bytes::from("key"), b"value2", 2));
@@ -836,6 +839,7 @@ mod tests {
             assert_eq!(started_seq, txn_seq);
         }
 
+        db.inner.oracle.advance_committed_seq(4);
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value2", 2));
@@ -858,6 +862,7 @@ mod tests {
         let db = setup_test_db_with_merge_operator().await;
         db.inner.oracle.advance_durable_seq(4);
 
+        db.inner.oracle.advance_committed_seq(4);
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value1", 1));
         table.put(RowEntry::new_value(&Bytes::from("key"), b"value2", 2));
@@ -958,6 +963,7 @@ mod tests {
     #[tokio::test]
     async fn stream_imm_ssts_without_extractor_emits_single_empty_prefix() {
         let db = setup_test_db_without_merge_operator().await;
+        db.inner.oracle.advance_committed_seq(u64::MAX);
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(b"k1", b"v1", 1));
@@ -990,6 +996,7 @@ mod tests {
             Arc::new(FixedThreeBytePrefixExtractor),
         )
         .await;
+        db.inner.oracle.advance_committed_seq(u64::MAX);
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
         let segment_sst_ids = preallocate_ids([]);
@@ -1015,6 +1022,7 @@ mod tests {
         // an empty Vec — symmetric with the extractor case. Manifest
         // progress (last_l0_seq, replay frontier) advances independently.
         let db = setup_test_db_without_merge_operator().await;
+        db.inner.oracle.advance_committed_seq(u64::MAX);
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
         let segment_sst_ids = preallocate_ids([Bytes::new()]);
@@ -1041,6 +1049,7 @@ mod tests {
             Arc::new(FixedThreeBytePrefixExtractor),
         )
         .await;
+        db.inner.oracle.advance_committed_seq(u64::MAX);
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
         // Sorted within and across prefixes.
@@ -1122,6 +1131,7 @@ mod tests {
             Arc::new(FixedThreeBytePrefixExtractor),
         )
         .await;
+        db.inner.oracle.advance_committed_seq(u64::MAX);
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(b"aaa-1", b"v1", 1));
@@ -1158,6 +1168,7 @@ mod tests {
             Arc::new(FixedThreeBytePrefixExtractor),
         )
         .await;
+        db.inner.oracle.advance_committed_seq(u64::MAX);
         db.inner.oracle.advance_durable_seq(u64::MAX);
         let table = WritableKVTable::new();
         table.put(RowEntry::new_value(b"aaa-1", b"v1", 1));

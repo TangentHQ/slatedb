@@ -832,7 +832,7 @@ impl ManifestWriterHandler {
         attached_wal_boundary: Option<u64>,
     ) -> Result<DirtyObject<Manifest>, SlateDBError> {
         let min_active_snapshot_seq = [
-            self.db.snapshot_manager.min_active_seq(),
+            Some(self.db.snapshot_manager.min_retained_seq()),
             self.db.txn_manager.min_active_seq(),
         ]
         .into_iter()
@@ -1818,15 +1818,18 @@ mod tests {
     }
 
     #[rstest::rstest]
-    #[case(None, None, 30)]
-    #[case(Some(10), None, 10)]
-    #[case(None, Some(20), 20)]
-    #[case(Some(10), Some(20), 10)]
-    #[case(Some(20), Some(10), 10)]
+    #[case(None, None, 30, 30)]
+    #[case(Some(10), None, 30, 10)]
+    #[case(None, Some(20), 30, 20)]
+    #[case(Some(10), Some(20), 30, 10)]
+    #[case(Some(20), Some(10), 30, 10)]
+    #[case(None, None, 7, 7)]
+    #[case(Some(20), Some(10), 7, 7)]
     #[tokio::test]
     async fn manifest_writes_refresh_snapshot_min_seq_without_uploaded_tables(
         #[case] snapshot_seq: Option<u64>,
         #[case] txn_seq: Option<u64>,
+        #[case] durable_seq: u64,
         #[case] expected_min_seq: u64,
     ) {
         let harness = setup_harness(
@@ -1847,6 +1850,7 @@ mod tests {
             handler.db.txn_manager.new_transaction().0
         });
         handler.db.oracle.advance_committed_seq(30);
+        handler.db.oracle.advance_durable_seq(durable_seq);
         handler.db.state.write().modify(|modifier| {
             modifier.state.manifest.value.core.last_l0_seq = 30;
         });
@@ -1891,7 +1895,7 @@ mod tests {
                 .state()
                 .core()
                 .recent_snapshot_min_seq,
-            30
+            durable_seq
         );
         assert_eq!(
             manifest_store
@@ -1901,7 +1905,7 @@ mod tests {
                 .manifest
                 .core
                 .recent_snapshot_min_seq,
-            30
+            durable_seq
         );
     }
 
