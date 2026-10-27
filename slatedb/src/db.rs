@@ -785,6 +785,14 @@ impl Db {
         Ok(snapshot)
     }
 
+    /// Capture a fixed remotely durable view without flushing or waiting for
+    /// pending writes. Later durability advancement cannot change this view.
+    /// Snapshot registration retains its versions through flushing and compaction.
+    pub fn durable_snapshot(&self) -> Result<Arc<DbSnapshot>, crate::Error> {
+        self.inner.check_closed()?;
+        Ok(DbSnapshot::new_durable(self.inner.clone()))
+    }
+
     /// Get a value from the database with default read options.
     ///
     /// The `Bytes` object returned contains a slice of an entire
@@ -2223,6 +2231,61 @@ impl DbWalObserver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn durable_snapshot_keeps_one_remote_view_while_writes_and_flushes_advance() {
+        let store = Arc::new(InMemory::new());
+        let settings = crate::config::Settings {
+            flush_interval: None,
+            compactor_options: None,
+            garbage_collector_options: None,
+            ..Default::default()
+        };
+        let db = Db::builder("durable-snapshot", store)
+            .with_settings(settings)
+            .build()
+            .await
+            .unwrap();
+        let mut initial = WriteBatch::new();
+        initial.put(b"a", b"old");
+        initial.put(b"b", b"old");
+        let first = db.write(initial).await.unwrap();
+        db.flush().await.unwrap();
+        first.await_durable().await.unwrap();
+        let before = db.status().durable_seq;
+        let pending = db.put(b"a", b"new").await.unwrap();
+        let view = db.durable_snapshot().unwrap();
+        assert_eq!(view.seq(), before);
+        assert_eq!(db.status().durable_seq, before);
+        assert_eq!(view.get(b"a").await.unwrap().unwrap().as_ref(), b"old");
+        let last = db.put(b"b", b"new").await.unwrap();
+        db.flush().await.unwrap();
+        pending.await_durable().await.unwrap();
+        last.await_durable().await.unwrap();
+        db.flush_with_options(FlushOptions {
+            flush_type: FlushType::MemTable,
+        })
+        .await
+        .unwrap();
+        assert_eq!(view.get(b"a").await.unwrap().unwrap().as_ref(), b"old");
+        assert_eq!(view.get(b"b").await.unwrap().unwrap().as_ref(), b"old");
+        let mut rows = view.scan(..).await.unwrap();
+        let mut values = Vec::new();
+        while let Some(row) = rows.next().await.unwrap() {
+            values.push(row.value);
+        }
+        assert_eq!(
+            values,
+            vec![Bytes::from_static(b"old"), Bytes::from_static(b"old")]
+        );
+        let latest = db.durable_snapshot().unwrap();
+        assert_eq!(latest.get(b"a").await.unwrap().unwrap().as_ref(), b"new");
+        assert_eq!(latest.get(b"b").await.unwrap().unwrap().as_ref(), b"new");
+        drop(rows);
+        drop(view);
+        drop(latest);
+        db.close().await.unwrap();
+    }
     use crate::block_cache_policy::BlockCachePolicy;
     use crate::config::DurabilityLevel::{Memory, Remote};
     use crate::config::MetricLevel;

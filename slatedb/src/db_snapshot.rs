@@ -28,6 +28,15 @@ impl DbSnapshot {
         })
     }
 
+    pub(crate) fn new_durable(db_inner: Arc<DbInner>) -> Arc<Self> {
+        let (snapshot_id, started_seq) = db_inner.snapshot_manager.new_durable_snapshot();
+        Arc::new(Self {
+            snapshot_id,
+            started_seq,
+            db_inner,
+        })
+    }
+
     /// Get the sequence number this snapshot was started at. This determines data visibility
     /// for reads in this snapshot.
     pub fn seq(&self) -> u64 {
