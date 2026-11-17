@@ -1268,6 +1268,8 @@ pub(crate) struct GatedObjectStore {
     pub(crate) get_opts_gate: Gate,
     pub(crate) head_gate: Gate,
     pub(crate) put_opts_gate: Gate,
+    /// When set, `put_opts_gate` holds only puts to a path containing this.
+    put_opts_only: Option<&'static str>,
     pub(crate) put_multipart_opts_gate: Gate,
     pub(crate) multipart_created_gate: Arc<Gate>,
     pub(crate) multipart_put_part_gate: Arc<Gate>,
@@ -1288,6 +1290,7 @@ impl GatedObjectStore {
             get_opts_gate: Gate::default(),
             head_gate: Gate::default(),
             put_opts_gate: Gate::default(),
+            put_opts_only: None,
             put_multipart_opts_gate: Gate::default(),
             multipart_created_gate: Arc::new(Gate::default()),
             multipart_put_part_gate: Arc::new(Gate::default()),
@@ -1297,6 +1300,12 @@ impl GatedObjectStore {
             delete_stream_gate: Arc::new(Gate::default()),
             multipart_aborts: Arc::new(AtomicUsize::new(0)),
         }
+    }
+
+    /// Limits `put_opts_gate` to puts whose path contains `fragment`.
+    pub(crate) fn with_put_opts_only(mut self, fragment: &'static str) -> Self {
+        self.put_opts_only = Some(fragment);
+        self
     }
 }
 
@@ -1357,7 +1366,12 @@ impl ObjectStore for GatedObjectStore {
         payload: PutPayload,
         opts: OS_PutOptions,
     ) -> object_store::Result<PutResult> {
-        self.put_opts_gate.wait().await?;
+        if self
+            .put_opts_only
+            .is_none_or(|only| location.as_ref().contains(only))
+        {
+            self.put_opts_gate.wait().await?;
+        }
         self.inner.put_opts(location, payload, opts).await
     }
 

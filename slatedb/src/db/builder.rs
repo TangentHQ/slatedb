@@ -130,6 +130,7 @@ use crate::compactions_store::CompactionsStore;
 use crate::compactor::stats::CompactionStats;
 use crate::compactor::CompactorEventHandler;
 use crate::compactor::CompactorMessage;
+use crate::compactor::DeferredCompactorEventHandler;
 use crate::compactor::SizeTieredCompactionSchedulerSupplier;
 use crate::compactor::COMPACTOR_TASK_NAME;
 use crate::compactor::{CompactionSchedulerSupplier, Compactor};
@@ -817,13 +818,11 @@ impl<P: Into<Path>> DbBuilder<P> {
                 TableStoreKind::Compactor,
                 self.block_cache_policy.clone(),
             ));
-            let compactor_handlers = builder
-                .build_handler(
-                    compactor_table_store,
-                    manifest_store.clone(),
-                    compactions_store.clone(),
-                )
-                .await?;
+            let compactor_handlers = builder.build_handler(
+                compactor_table_store,
+                manifest_store.clone(),
+                compactions_store.clone(),
+            );
             task_executor.add_handler(
                 COMPACTOR_TASK_NAME.to_string(),
                 Box::new(compactor_handlers.handler),
@@ -1242,8 +1241,9 @@ impl<P: Into<Path>> GarbageCollectorBuilder<P> {
 /// [`CompactorBuilder::build_handler`]. Each handler and its receiver must be registered
 /// with the task executor in `DbBuilder::build`.
 pub(crate) struct CompactorHandlers {
-    /// The coordinator event handler.
-    pub(crate) handler: CompactorEventHandler,
+    /// The coordinator event handler, which claims the compactor epoch on its
+    /// first event.
+    pub(crate) handler: DeferredCompactorEventHandler,
     /// Receiver for the coordinator's messages.
     pub(crate) rx: async_channel::Receiver<CompactorMessage>,
     /// The embedded worker handler and its receiver, present when
@@ -1345,6 +1345,9 @@ impl<P: Into<Path>> CompactorBuilder<P> {
     /// [`crate::CloseReason::Fenced`]. Writer epoch changes are tolerated.
     /// Without this option, startup retries claims against newer compactors.
     /// `expected_epoch` must be less than `u64::MAX`.
+    ///
+    /// A compactor run by a [`crate::Db`] claims its epoch after the database
+    /// has opened, so there the failure closes the database with that reason.
     pub fn with_expected_epoch(mut self, expected_epoch: u64) -> Self {
         self.expected_epoch = Some(expected_epoch);
         self
@@ -1509,18 +1512,19 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         )
     }
 
-    /// Build a CompactorEventHandler and optionally an embedded worker from this builder's
-    /// configuration.
+    /// Build the coordinator handler and optionally an embedded worker from this
+    /// builder's configuration, without touching the object store: the coordinator
+    /// claims the compactor epoch on its first event.
     ///
     /// The embedded worker handler is present when [`CompactorOptions::worker`] is `Some`.
     /// Each handler and its receiver must be registered with the task executor in
     /// DbBuilder::build.
-    pub(crate) async fn build_handler(
+    pub(crate) fn build_handler(
         self,
         table_store: Arc<TableStore>,
         manifest_store: Arc<ManifestStore>,
         compactions_store: Arc<CompactionsStore>,
-    ) -> Result<CompactorHandlers, SlateDBError> {
+    ) -> CompactorHandlers {
         let recorder = MetricsRecorderHelper::new(
             self.metrics_recorder,
             self.options.metric_level.unwrap_or_default(),
@@ -1532,18 +1536,20 @@ impl<P: Into<Path>> CompactorBuilder<P> {
         let (_tx, rx) = async_channel::unbounded();
         let scheduler = Arc::from(scheduler_supplier.compaction_scheduler(&options));
         let stats = Arc::new(CompactionStats::new(&recorder));
-        let handler = CompactorEventHandler::new(
-            manifest_store.clone(),
-            compactions_store.clone(),
+        let handler = DeferredCompactorEventHandler::new(
             options.clone(),
-            scheduler,
-            self.rand.clone(),
-            stats.clone(),
-            self.system_clock.clone(),
-            recorder.clone(),
-            self.expected_epoch,
-        )
-        .await?;
+            Box::pin(CompactorEventHandler::new(
+                manifest_store.clone(),
+                compactions_store.clone(),
+                options.clone(),
+                scheduler,
+                self.rand.clone(),
+                stats.clone(),
+                self.system_clock.clone(),
+                recorder.clone(),
+                self.expected_epoch,
+            )),
+        );
         let worker = options.worker.clone().map(|worker_options| {
             CompactionWorkerHandler::build_worker_handler(
                 manifest_store,
@@ -1561,11 +1567,11 @@ impl<P: Into<Path>> CompactorBuilder<P> {
                 self.compaction_filter_supplier,
             )
         });
-        Ok(CompactorHandlers {
+        CompactorHandlers {
             handler,
             rx,
             worker,
-        })
+        }
     }
 }
 
