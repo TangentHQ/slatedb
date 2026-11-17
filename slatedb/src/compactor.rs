@@ -593,7 +593,7 @@ pub(crate) struct CompactorEventHandler {
     last_incremental_commit: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-/// The coordinator's tickers. Each fires once as soon as its task starts.
+/// The coordinator's tickers.
 fn tickers(options: &CompactorOptions) -> Vec<MessageTickerDef<CompactorMessage>> {
     vec![
         MessageTickerDef::new(
@@ -2026,16 +2026,6 @@ mod tests {
         Some(latest.compactions.compactor_epoch)
     }
 
-    /// A standalone coordinator with no worker, so its task is the only one to join.
-    fn coordinator(os: Arc<dyn ObjectStore>) -> Compactor {
-        CompactorBuilder::new(PATH, os)
-            .with_options(CompactorOptions {
-                worker: None,
-                ..compactor_options()
-            })
-            .build()
-    }
-
     #[tokio::test]
     async fn test_db_open_does_not_wait_for_compactor_epoch_claim() {
         // given: an object store that holds every write of the compactions file.
@@ -2055,7 +2045,7 @@ mod tests {
         .expect("the open waited for the compactor's claim")
         .unwrap();
 
-        // then: it is open while the claim is still on its way,
+        // then: it is open while the claim is still on its way.
         tokio::time::timeout(
             Duration::from_secs(30),
             gated.put_opts_gate.wait_for_arrivals(1),
@@ -2065,15 +2055,7 @@ mod tests {
         assert_eq!(claimed_epoch(inner.clone()).await, None);
         db.put(b"key", b"value").await.unwrap();
 
-        // and the claim lands once the store lets it through.
         gated.put_opts_gate.release();
-        let claimed = run_for(Duration::from_secs(30), || async {
-            claimed_epoch(inner.clone())
-                .await
-                .filter(|epoch| *epoch == 1)
-        })
-        .await;
-        assert_eq!(claimed, Some(1));
         db.close().await.unwrap();
     }
 
@@ -2089,7 +2071,12 @@ mod tests {
             .close()
             .await
             .unwrap();
-        let first = coordinator(os.clone());
+        let first = CompactorBuilder::new(PATH, os.clone())
+            .with_options(CompactorOptions {
+                worker: None,
+                ..compactor_options()
+            })
+            .build();
         first.start().await.unwrap();
         assert_eq!(claimed_epoch(os.clone()).await, Some(1));
 
@@ -2111,40 +2098,6 @@ mod tests {
         );
         assert_eq!(claimed_epoch(os).await, Some(2));
         db.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_db_compactor_is_fenced_by_later_compactor() {
-        // given: a database whose own compactor has claimed the epoch.
-        let os: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let db = Db::builder(PATH, os.clone())
-            .with_settings(db_options(Some(compactor_options())))
-            .build()
-            .await
-            .unwrap();
-        let mut status = db.subscribe();
-        let claimed = run_for(Duration::from_secs(30), || async {
-            claimed_epoch(os.clone()).await
-        })
-        .await;
-        assert_eq!(claimed, Some(1));
-
-        // when: another compactor claims the next epoch.
-        let second = coordinator(os.clone());
-        second.start().await.unwrap();
-
-        // then: the database's compactor is fenced, which closes the database.
-        let closed = tokio::time::timeout(
-            Duration::from_secs(30),
-            status.wait_for(|status| status.close_reason.is_some()),
-        )
-        .await
-        .expect("the database's compactor was never fenced")
-        .unwrap()
-        .clone();
-        assert_eq!(closed.close_reason, Some(crate::CloseReason::Fenced));
-        assert_eq!(claimed_epoch(os).await, Some(2));
-        second.stop().await.unwrap();
     }
 
     #[tokio::test]

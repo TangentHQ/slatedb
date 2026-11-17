@@ -728,7 +728,9 @@ impl MessageHandler<WorkerMessage> for CompactionWorkerHandler {
 
     async fn handle(&mut self, message: WorkerMessage) -> Result<(), SlateDBError> {
         if !self.ensure_loaded().await? {
-            warn!(
+            // Normal for a new database's own worker: it starts before the
+            // coordinator's first event creates the file.
+            debug!(
                 ".compactions does not exist yet; retrying on the next poll [worker_id={}]",
                 self.worker_id
             );
